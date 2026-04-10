@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from scrapers.musinsa import MusinsaScraper
 from scrapers.cm29 import CM29Scraper
 from scrapers.nike import NikeScraper
-from scrapers.adidas import AdidasScraper
+from scrapers.arcteryx import ArcterycScraper
 from scrapers.generic import GenericScraper
 
 
@@ -63,8 +63,8 @@ def get_scraper(url: str):
         return CM29Scraper()
     if "nike.com/kr" in u:
         return NikeScraper()
-    if "adidas.co.kr" in u:
-        return AdidasScraper()
+    if "arcteryx.co.kr" in u:
+        return ArcterycScraper()
     return GenericScraper()
 
 
