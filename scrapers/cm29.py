@@ -86,6 +86,10 @@ class CM29Scraper(BaseScraper):
 
         options = self._parse_option_items(d, base_price)
 
+        # useOption=False: 옵션 없는 단일 상품 → 상품 레벨 재고 사용
+        if not options and not d.get("useOption", True):
+            options = self._make_single_option(d, base_price)
+
         if not options:
             raise RuntimeError(
                 f"29cm 옵션 파싱 실패 (ID: {pid})\n"
@@ -100,6 +104,28 @@ class CM29Scraper(BaseScraper):
         )
 
     # ── 옵션 파서 ─────────────────────────────────────────────────────────────
+
+    def _make_single_option(self, d: dict, base_price: int) -> list[ProductOption]:
+        """useOption=False인 단일 상품의 재고를 상품 레벨에서 파싱."""
+        limited_qty = d.get("limitedQty")
+        try:
+            stock = int(limited_qty) if limited_qty is not None else -1
+        except (ValueError, TypeError):
+            stock = -1
+
+        status  = d.get("frontItemStockStatus", "")
+        soldout = (status == "SOLD_OUT") or (stock == 0)
+        if soldout:
+            stock = 0
+
+        return [ProductOption(
+            color="",
+            size="단일",
+            stock=stock,
+            price=base_price,
+            soldout=soldout,
+            option_id="",
+        )]
 
     def _parse_option_items(self, d: dict, base_price: int) -> list[ProductOption]:
         """
