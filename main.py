@@ -3,9 +3,12 @@
 실행: uvicorn main:app --host 0.0.0.0 --port 8002
 """
 
+import os
 import re
+import asyncio
 import httpx
 import traceback
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Query
@@ -20,7 +23,29 @@ from scrapers.nike import NikeScraper
 from scrapers.adidas import AdidasScraper
 from scrapers.generic import GenericScraper
 
-app = FastAPI(title="Inventory Checker")
+
+# ── Render 슬립 방지: 14분마다 자체 핑 ───────────────────────────────────────
+async def _keep_alive(url: str) -> None:
+    """Render 무료 플랜 슬립(15분) 방지용 자체 핑 루프."""
+    await asyncio.sleep(60)          # 서버 완전 기동 후 시작
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                await c.get(url)
+        except Exception:
+            pass
+        await asyncio.sleep(14 * 60)  # 14분 대기
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if render_url:
+        asyncio.create_task(_keep_alive(f"{render_url}/api/health"))
+    yield
+
+
+app = FastAPI(title="Inventory Checker", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
