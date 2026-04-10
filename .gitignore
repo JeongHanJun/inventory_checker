@@ -1,0 +1,16 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 로컬 전용 (Cloudflare 터널, 자동실행 등)
+*.bat
+*.ps1
+
+# 디버그용 스크린샷
+*.png
+
+# Claude 설정
+.claude/
