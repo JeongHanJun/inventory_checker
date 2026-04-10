@@ -74,7 +74,12 @@ class CM29Scraper(BaseScraper):
             raw = resp.json()
 
         # 응답 구조: {"result":"SUCCESS", "data": { 상품데이터 }}
-        d = raw.get("data", raw)
+        if raw.get("result") == "FAIL" or raw.get("data") is None:
+            msg = raw.get("message", "")
+            raise RuntimeError(f"29cm 상품을 찾을 수 없습니다. (ID: {pid}){f' — {msg}' if msg else ''}")
+        d = raw.get("data") or raw
+        if not isinstance(d, dict):
+            raise RuntimeError(f"29cm 상품을 찾을 수 없습니다. (ID: {pid})")
 
         product_name = d.get("itemName") or f"29cm #{pid}"
         base_price   = int(d.get("sellPrice") or d.get("consumerPrice") or 0)

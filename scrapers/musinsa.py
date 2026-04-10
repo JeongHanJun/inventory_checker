@@ -256,7 +256,7 @@ class MusinsaScraper(BaseScraper):
             if color or size:
                 options.append(ProductOption(
                     color=color,
-                    size=size,
+                    size=size or "단일",   # 사이즈 없는 단일 옵션 상품
                     stock=stock,
                     price=price,
                     soldout=soldout,
