@@ -135,65 +135,73 @@ class MusinsaScraper(BaseScraper):
 
     # ── 재고 수량 바이너리 서치 ───────────────────────────────────────────────
 
+    _FULFILLMENT_IDS = [2, 1, 3]   # 시도 순서: 2가 가장 널리 쓰임
+
     async def _fill_stock_counts(
         self, client: httpx.AsyncClient, pid: str, options: list[ProductOption]
     ) -> None:
         """activated=True인 옵션들의 재고 수량을 병렬 바이너리 서치로 채움."""
-        tasks = []
-        indices = []
-        for i, opt in enumerate(options):
-            if not opt.soldout and opt.option_id:
-                tasks.append(
-                    self._binary_search_stock(client, pid, int(opt.option_id))
-                )
-                indices.append(i)
-
-        if not tasks:
+        active = [(i, opt) for i, opt in enumerate(options)
+                  if not opt.soldout and opt.option_id]
+        if not active:
             return
 
+        # 첫 번째 활성 옵션으로 fulfillmentCenterId 탐색
+        first_option_id = int(active[0][1].option_id)
+        fid = await self._probe_fulfillment_id(client, pid, first_option_id)
+
+        tasks   = [self._binary_search_stock(client, pid, int(opt.option_id), fid)
+                   for _, opt in active]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in zip(indices, results):
+
+        for (i, _), result in zip(active, results):
             if isinstance(result, int):
                 options[i].stock   = result
                 options[i].soldout = (result == 0)
 
-    async def _binary_search_stock(
+    async def _probe_fulfillment_id(
         self, client: httpx.AsyncClient, pid: str, option_item_no: int
+    ) -> int:
+        """재고가 있다고 응답하는 첫 번째 fulfillmentCenterId 반환."""
+        for fid in self._FULFILLMENT_IDS:
+            oos = await self._check_out_of_stock(client, pid, option_item_no, 1, fid)
+            if not oos:        # 재고 있음 → 이 센터 ID 사용
+                return fid
+        return self._FULFILLMENT_IDS[0]   # 모두 품절이면 기본값
+
+    async def _binary_search_stock(
+        self, client: httpx.AsyncClient, pid: str, option_item_no: int, fid: int
     ) -> int:
         """
         check-available-stock POST API를 이용해 바이너리 서치로 재고 수량 반환.
-        반환값:
           0   → 품절
           N   → 정확한 재고 수량
-          -1  → _STOCK_MAX_QTY 초과 (수량 미표시, '재고 있음'으로 처리)
+          -1  → _STOCK_MAX_QTY 초과
         """
-        # 1개라도 재고 있는지 확인
-        if await self._check_out_of_stock(client, pid, option_item_no, 1):
+        if await self._check_out_of_stock(client, pid, option_item_no, 1, fid):
             return 0
+        if not await self._check_out_of_stock(client, pid, option_item_no, self._STOCK_MAX_QTY + 1, fid):
+            return -1
 
-        # max_qty 초과 여부 확인
-        if not await self._check_out_of_stock(client, pid, option_item_no, self._STOCK_MAX_QTY + 1):
-            return -1   # 100개 초과 → 수량 미표시
-
-        # 바이너리 서치: isOutOfStock=False인 최대 quantity 탐색
         lo, hi = 1, self._STOCK_MAX_QTY
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if await self._check_out_of_stock(client, pid, option_item_no, mid):
+            if await self._check_out_of_stock(client, pid, option_item_no, mid, fid):
                 hi = mid - 1
             else:
                 lo = mid
         return lo
 
     async def _check_out_of_stock(
-        self, client: httpx.AsyncClient, pid: str, option_item_no: int, quantity: int
+        self, client: httpx.AsyncClient, pid: str, option_item_no: int,
+        quantity: int, fid: int = 2
     ) -> bool:
         """quantity 만큼 구매 가능한지 확인. True=재고 부족."""
         try:
             resp = await client.post(
                 f"https://goods-detail.musinsa.com/api2/goods/{pid}/options/check-available-stock",
                 json={
-                    "fulfillmentCenterId": 1,
+                    "fulfillmentCenterId": fid,
                     "optionItemNo": option_item_no,
                     "quantity": quantity,
                 },

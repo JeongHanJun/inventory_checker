@@ -55,15 +55,27 @@ class AdidasScraper(BaseScraper):
             avail_task = asyncio.create_task(self._fetch_availability(client, pid))
             (name, color, price), variations = await asyncio.gather(info_task, avail_task)
 
+        # availability API 실패 시 product info의 variation_list로 fallback
         if not variations:
-            raise RuntimeError(
-                f"Adidas 재고 정보를 가져올 수 없습니다. (pid={pid})"
-            )
+            variations = await self._fetch_variation_list(pid)
+            if not variations:
+                raise RuntimeError(
+                    f"Adidas 재고 정보를 가져올 수 없습니다. (pid={pid})"
+                )
 
         options = []
         for v in variations:
-            stock = v.get("availability", 0)
-            soldout = v.get("availability_status", "NOT_AVAILABLE") != "IN_STOCK"
+            stock = v.get("availability", -1)
+            avail_status = v.get("availability_status", "")
+            if avail_status == "NOT_AVAILABLE":
+                soldout = True
+                stock = 0
+            elif avail_status == "IN_STOCK":
+                soldout = False
+            else:
+                # fallback variation_list: 재고 수량 불명
+                soldout = False
+                stock = -1
             options.append(ProductOption(
                 color=color or pid,
                 size=v.get("size", ""),
@@ -103,7 +115,7 @@ class AdidasScraper(BaseScraper):
     async def _fetch_availability(
         self, client: httpx.AsyncClient, pid: str
     ) -> list[dict]:
-        """사이즈별 재고 목록 반환"""
+        """사이즈별 재고 목록 반환. 403(클라우드 IP 차단) 시 빈 리스트."""
         try:
             r = await client.get(
                 f"https://www.adidas.co.kr/api/products/{pid}/availability"
@@ -111,5 +123,22 @@ class AdidasScraper(BaseScraper):
             if r.status_code != 200:
                 return []
             return r.json().get("variation_list", [])
+        except Exception:
+            return []
+
+    async def _fetch_variation_list(self, pid: str) -> list[dict]:
+        """availability API 차단 시 product info의 variation_list로 fallback.
+        재고 수량은 알 수 없고 사이즈 목록만 반환 (stock=-1, soldout=False)."""
+        try:
+            async with httpx.AsyncClient(
+                headers=self._HEADERS, timeout=15.0, follow_redirects=True
+            ) as client:
+                r = await client.get(
+                    f"https://www.adidas.co.kr/api/products/{pid}?sitePath=kr"
+                )
+                if r.status_code != 200:
+                    return []
+                # variation_list에는 sku/size만 있고 availability 없음
+                return r.json().get("variation_list", [])
         except Exception:
             return []
