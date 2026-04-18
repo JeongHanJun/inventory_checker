@@ -155,13 +155,9 @@ class MusinsaScraper(BaseScraper):
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for (i, _), result in zip(active, results):
-            if isinstance(result, int) and result != 0:
-                # 양수(-1 포함)만 신뢰: 정확한 재고 수량 또는 충분한 재고
+            if isinstance(result, int):
                 options[i].stock   = result
-                options[i].soldout = False
-            # result == 0이면 업데이트 안 함: activated=True 옵션에 대해
-            # check-available-stock이 마켓플레이스 상품 등에서 오작동할 수 있으므로
-            # options API의 activated 플래그를 우선함 (stock=-1, soldout=False 유지)
+                options[i].soldout = (result == 0)
 
     async def _probe_fulfillment_id(
         self, client: httpx.AsyncClient, pid: str, option_item_no: int
@@ -193,8 +189,13 @@ class MusinsaScraper(BaseScraper):
                     alt = candidate
                     break
             if alt is None:
-                return 0  # 모든 fid가 OOS
-            fid = alt
+                # 마지막 수단: fid 없이 시도 (MFS 다중재고 상품)
+                if not await self._check_out_of_stock(client, pid, option_item_no, 1, None):
+                    fid = None
+                else:
+                    return 0  # 모든 방법이 OOS → 품절
+            else:
+                fid = alt
         if not await self._check_out_of_stock(client, pid, option_item_no, self._STOCK_MAX_QTY + 1, fid):
             return -1
 
@@ -209,17 +210,17 @@ class MusinsaScraper(BaseScraper):
 
     async def _check_out_of_stock(
         self, client: httpx.AsyncClient, pid: str, option_item_no: int,
-        quantity: int, fid: int = 2
+        quantity: int, fid: int | None = 2
     ) -> bool:
-        """quantity 만큼 구매 가능한지 확인. True=재고 부족."""
+        """quantity 만큼 구매 가능한지 확인. True=재고 부족.
+        fid=None: fulfillmentCenterId 생략 (MFS 다중재고 상품용)."""
+        body: dict = {"optionItemNo": option_item_no, "quantity": quantity}
+        if fid is not None:
+            body["fulfillmentCenterId"] = fid
         try:
             resp = await client.post(
                 f"https://goods-detail.musinsa.com/api2/goods/{pid}/options/check-available-stock",
-                json={
-                    "fulfillmentCenterId": fid,
-                    "optionItemNo": option_item_no,
-                    "quantity": quantity,
-                },
+                json=body,
             )
             if resp.status_code != 200:
                 return False
