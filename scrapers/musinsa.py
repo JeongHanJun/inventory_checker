@@ -135,7 +135,7 @@ class MusinsaScraper(BaseScraper):
 
     # ── 재고 수량 바이너리 서치 ───────────────────────────────────────────────
 
-    _FULFILLMENT_IDS = [2, 3]   # 1은 일부 상품에서 잘못된 재고 있음 응답을 반환함
+    _FULFILLMENT_IDS = [2, 1, 3]   # 시도 순서: 2가 가장 널리 쓰임
 
     async def _fill_stock_counts(
         self, client: httpx.AsyncClient, pid: str, options: list[ProductOption]
