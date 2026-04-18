@@ -135,7 +135,7 @@ class MusinsaScraper(BaseScraper):
 
     # ── 재고 수량 바이너리 서치 ───────────────────────────────────────────────
 
-    _FULFILLMENT_IDS = [2, 1, 3]   # 시도 순서: 2가 가장 널리 쓰임
+    _FULFILLMENT_IDS = [2, 3]   # 1은 일부 상품에서 잘못된 재고 있음 응답을 반환함
 
     async def _fill_stock_counts(
         self, client: httpx.AsyncClient, pid: str, options: list[ProductOption]
@@ -155,9 +155,13 @@ class MusinsaScraper(BaseScraper):
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for (i, _), result in zip(active, results):
-            if isinstance(result, int):
+            if isinstance(result, int) and result != 0:
+                # 양수(-1 포함)만 신뢰: 정확한 재고 수량 또는 충분한 재고
                 options[i].stock   = result
-                options[i].soldout = (result == 0)
+                options[i].soldout = False
+            # result == 0이면 업데이트 안 함: activated=True 옵션에 대해
+            # check-available-stock이 마켓플레이스 상품 등에서 오작동할 수 있으므로
+            # options API의 activated 플래그를 우선함 (stock=-1, soldout=False 유지)
 
     async def _probe_fulfillment_id(
         self, client: httpx.AsyncClient, pid: str, option_item_no: int
