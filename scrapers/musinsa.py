@@ -154,10 +154,22 @@ class MusinsaScraper(BaseScraper):
                    for _, opt in active]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # 하나라도 양수 재고가 확인되면 API가 정상 작동 중인 것으로 판단
+        api_working = any(isinstance(r, int) and r != 0 for r in results)
+
         for (i, _), result in zip(active, results):
-            if isinstance(result, int):
+            if not isinstance(result, int):
+                continue
+            if api_working:
+                # API 정상: 0은 진짜 품절, 양수는 정확한 수량
                 options[i].stock   = result
                 options[i].soldout = (result == 0)
+            elif result != 0:
+                # API 비정상이지만 이 옵션은 수량 확인됨
+                options[i].stock   = result
+                options[i].soldout = False
+            # api_working=False이고 result=0이면 업데이트 안 함
+            # (모든 옵션이 0 → API 자체가 이 상품 미지원, activated 유지)
 
     async def _probe_fulfillment_id(
         self, client: httpx.AsyncClient, pid: str, option_item_no: int
