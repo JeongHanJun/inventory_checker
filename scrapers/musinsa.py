@@ -178,12 +178,23 @@ class MusinsaScraper(BaseScraper):
     ) -> int:
         """
         check-available-stock POST API를 이용해 바이너리 서치로 재고 수량 반환.
-          0   → 품절
+          0   → 품절 (모든 fid가 OOS 반환)
           N   → 정확한 재고 수량
           -1  → _STOCK_MAX_QTY 초과
         """
         if await self._check_out_of_stock(client, pid, option_item_no, 1, fid):
-            return 0
+            # primary fid가 OOS → 이 옵션에 맞는 대안 fid 탐색
+            # (옵션마다 물류센터가 다를 수 있으므로 옵션 단위로 재시도)
+            alt = None
+            for candidate in self._FULFILLMENT_IDS:
+                if candidate == fid:
+                    continue
+                if not await self._check_out_of_stock(client, pid, option_item_no, 1, candidate):
+                    alt = candidate
+                    break
+            if alt is None:
+                return 0  # 모든 fid가 OOS
+            fid = alt
         if not await self._check_out_of_stock(client, pid, option_item_no, self._STOCK_MAX_QTY + 1, fid):
             return -1
 
