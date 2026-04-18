@@ -182,20 +182,19 @@ class MusinsaScraper(BaseScraper):
             # primary fid가 OOS → 이 옵션에 맞는 대안 fid 탐색
             # (옵션마다 물류센터가 다를 수 있으므로 옵션 단위로 재시도)
             alt = None
-            for candidate in self._FULFILLMENT_IDS:
-                if candidate == fid:
-                    continue
-                if not await self._check_out_of_stock(client, pid, option_item_no, 1, candidate):
-                    alt = candidate
-                    break
-            if alt is None:
-                # 마지막 수단: fid 없이 시도 (MFS 다중재고 상품)
-                if not await self._check_out_of_stock(client, pid, option_item_no, 1, None):
-                    fid = None
-                else:
-                    return 0  # 모든 방법이 OOS → 품절
-            else:
-                fid = alt
+            # fid 1~15 + None 을 병렬로 탐색 (primary fid 제외)
+            all_candidates = [f for f in range(1, 16) if f != fid] + [None]
+            probe_results = await asyncio.gather(
+                *[self._check_out_of_stock(client, pid, option_item_no, 1, c)
+                  for c in all_candidates]
+            )
+            alt = next(
+                (c for c, oos in zip(all_candidates, probe_results) if not oos),
+                "NOT_FOUND",
+            )
+            if alt == "NOT_FOUND":
+                return 0  # 모든 fid가 OOS → 품절
+            fid = alt
         if not await self._check_out_of_stock(client, pid, option_item_no, self._STOCK_MAX_QTY + 1, fid):
             return -1
 
