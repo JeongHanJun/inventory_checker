@@ -39,7 +39,7 @@ class GenericScraper(BaseScraper):
             )
             page = await ctx.new_page()
 
-            async def on_response(resp: Response):
+            async def on_response(resp):
                 ct = resp.headers.get("content-type", "")
                 if "json" not in ct:
                     return
