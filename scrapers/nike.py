@@ -141,7 +141,7 @@ class NikeScraper(BaseScraper):
             if resp.status_code != 200:
                 return "", "", 0, ""
 
-            html = resp.text
+            html = resp.content.decode('utf-8', errors='replace')
 
             # groupKey를 HTML에서 추출 (URL에 없는 경우 대비)
             gk_match = re.search(r'"groupKey"\s*:\s*"([A-Za-z0-9]{6,12})"', html)

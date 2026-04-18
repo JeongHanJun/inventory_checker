@@ -79,7 +79,7 @@
   <div class="mb-6 flex items-center justify-between">
     <div>
       <h1 class="text-xl font-bold text-indigo-700">재고 조회기</h1>
-      <p class="text-xs text-gray-400 mt-0.5">Musinsa · 29cm · Nike · Adidas 사이즈별 재고 확인</p>
+      <p class="text-xs text-gray-400 mt-0.5">Musinsa · 29cm · Nike · Arc'teryx 사이즈별 재고 확인</p>
     </div>
     <button onclick="toggleHistory()"
       class="text-xs text-gray-500 border border-gray-200 rounded-xl px-3 py-1.5 hover:bg-indigo-50 hover:border-indigo-300 transition-colors flex items-center gap-1">
@@ -124,7 +124,7 @@
       <span class="site-chip" style="background:#e0f2fe;color:#0369a1;border-color:#bae6fd;">무신사</span>
       <span class="site-chip" style="background:#fce7f3;color:#9d174d;border-color:#fbcfe8;">29cm</span>
       <span class="site-chip" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0;">Nike KR</span>
-      <span class="site-chip" style="background:#fefce8;color:#854d0e;border-color:#fde68a;">Adidas KR</span>
+      <span class="site-chip" style="background:#f0f9ff;color:#075985;border-color:#bae6fd;">Arc'teryx</span>
     </div>
   </div>
 
@@ -344,7 +344,7 @@ function renderResult(data) {
   // KREAM 버튼 (스니커즈 사이트일 때만)
   const kreamBtn = document.getElementById("kreamBtn");
   kreamBtn.classList.toggle("hidden",
-    !["Nike","Adidas","무신사","Musinsa"].some(s => data.site.includes(s)));
+    !["Nike","Arc'teryx","무신사","Musinsa"].some(s => data.site.includes(s)));
 
   // 색상 필터
   const colors = [...new Set(data.options.map(o => o.color).filter(Boolean))].sort();
@@ -429,7 +429,7 @@ function stockBadgeHtml(o) {
     return '<span class="stock-uk">재고 있음</span>';
   }
 
-  // 정확한 수량 (무신사 / 29cm / Adidas)
+  // 정확한 수량 (무신사 / 29cm / Arc'teryx)
   if (o.stock <= 3)
     return `<span class="stock-num stock-low">${o.stock}개</span>`;
   return `<span class="stock-num stock-in">${o.stock}개</span>`;
