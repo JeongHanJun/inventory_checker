@@ -67,8 +67,9 @@ class MusinsaScraper(BaseScraper):
         async with httpx.AsyncClient(
             follow_redirects=True, timeout=15.0, headers=self._headers(pid)
         ) as client:
-            product_name, base_price = await self._fetch_goods_info(client, pid)
-            options = await self._fetch_options(client, pid, base_price)
+            product_name, base_price, sale_type = await self._fetch_goods_info(client, pid)
+            options = await self._fetch_options(client, pid, base_price,
+                                                run_stock_check=(sale_type == "SALE"))
 
         if not options:
             raise RuntimeError(
@@ -87,7 +88,8 @@ class MusinsaScraper(BaseScraper):
 
     async def _fetch_goods_info(
         self, client: httpx.AsyncClient, pid: str
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, str]:
+        """(상품명, 가격, goodsSaleType) 반환"""
         try:
             resp = await client.get(
                 f"https://goods-detail.musinsa.com/api2/goods/{pid}"
@@ -105,15 +107,17 @@ class MusinsaScraper(BaseScraper):
                     or d.get("goodsPrice", {}).get("normalPrice")
                     or 0
                 )
-                return str(name), int(price)
+                sale_type = d.get("goodsSaleType", "SALE")
+                return str(name), int(price), sale_type
         except Exception:
             pass
-        return f"Musinsa #{pid}", 0
+        return f"Musinsa #{pid}", 0, "SALE"
 
     # ── 옵션 조회 ─────────────────────────────────────────────────────────────
 
     async def _fetch_options(
-        self, client: httpx.AsyncClient, pid: str, base_price: int
+        self, client: httpx.AsyncClient, pid: str, base_price: int,
+        run_stock_check: bool = True,
     ) -> list[ProductOption]:
         for kind in self._OPT_KIND_CODES:
             params = "goodsSaleType=SALE"
@@ -126,8 +130,14 @@ class MusinsaScraper(BaseScraper):
                     continue
                 options = self._parse_option_items(resp.json(), base_price)
                 if options:
-                    # activated=True인 옵션에 대해 정확한 재고 수량 조회
-                    await self._fill_stock_counts(client, pid, options)
+                    if run_stock_check:
+                        # activated=True인 옵션에 대해 정확한 재고 수량 조회
+                        await self._fill_stock_counts(client, pid, options)
+                    else:
+                        # STOP_SALE 등 판매 중지 상태 → 전체 품절
+                        for opt in options:
+                            opt.stock = 0
+                            opt.soldout = True
                     return options
             except Exception:
                 continue
