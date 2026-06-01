@@ -1,5 +1,9 @@
 """
-29cm 스크래퍼 - 직접 API 호출 (Playwright 미사용, ~1-3초)
+29cm 스크래퍼 - curl_cffi 사용 (Cloudflare WAF 우회)
+
+기존 httpx는 Python OpenSSL TLS 지문 때문에 Cloudflare가 봇으로 판단해 403.
+curl_cffi의 Chrome impersonation으로 실제 브라우저 TLS 지문 흉내내서 통과.
++ 홈페이지 사전 방문으로 __cf_bm 쿠키 워밍.
 
 확인된 API:
   GET https://bff-api.29cm.co.kr/api/v5/product-detail/{id}
@@ -19,7 +23,7 @@
 """
 
 import re
-import httpx
+from curl_cffi.requests import AsyncSession
 
 from .base import BaseScraper, ProductInfo, ProductOption
 
@@ -44,12 +48,8 @@ class CM29Scraper(BaseScraper):
         return f"https://www.29cm.co.kr/products/{self._extract_id(url)}"
 
     def _headers(self) -> dict:
+        # User-Agent는 curl_cffi impersonate가 자동 설정
         return {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
             "Accept": "application/json",
             "Accept-Language": "ko-KR,ko;q=0.9",
             "Referer": "https://www.29cm.co.kr/",
@@ -60,10 +60,12 @@ class CM29Scraper(BaseScraper):
         pid = self._extract_id(url)
         normalized = self._normalize_url(url)
 
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=15.0, headers=self._headers()
-        ) as client:
-            resp = await client.get(
+        async with AsyncSession(
+            impersonate="chrome124", timeout=15.0, headers=self._headers()
+        ) as session:
+            # Cloudflare __cf_bm 쿠키 워밍: 홈페이지 먼저 방문
+            await session.get("https://www.29cm.co.kr/")
+            resp = await session.get(
                 f"https://bff-api.29cm.co.kr/api/v5/product-detail/{pid}"
             )
             if resp.status_code != 200:
