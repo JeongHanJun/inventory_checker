@@ -1,5 +1,9 @@
 """
-Musinsa 스크래퍼 - 직접 API 호출 (~2-5초)
+Musinsa 스크래퍼 - 직접 API 호출 (~2-5초), curl_cffi 사용 (Cloudflare WAF 우회)
+
+2026-09 기준 goods-detail.musinsa.com 이 Cloudflare 봇 차단을 켜서
+httpx(Python OpenSSL TLS 지문)로 보내면 모든 요청이 403 HTML을 받는다.
+29cm(cm29.py)와 동일하게 curl_cffi Chrome impersonation으로 우회한다.
 
 확인된 API 구조:
   goods_info:   goods-detail.musinsa.com/api2/goods/{id}
@@ -21,9 +25,18 @@ Musinsa 스크래퍼 - 직접 API 호출 (~2-5초)
 
 import asyncio
 import re
-import httpx
+
+from curl_cffi.requests import AsyncSession
 
 from .base import BaseScraper, ProductInfo, ProductOption
+
+
+class _StockUnknown(Exception):
+    """재고 확인 API가 응답하지 않아 수량을 판단할 수 없음.
+
+    _fill_stock_counts 가 이 예외를 만나면 해당 옵션을 건드리지 않고
+    activated 기반 초기값(재고있음/품절)을 그대로 남긴다.
+    """
 
 
 class MusinsaScraper(BaseScraper):
@@ -36,6 +49,7 @@ class MusinsaScraper(BaseScraper):
     ]
     _OPT_KIND_CODES = ["CLOTHES", "SHOES", "BAG", "ACC", ""]
     _STOCK_MAX_QTY  = 999   # 이 이상이면 -1(수량 미표시)로 처리
+    _IMPERSONATE    = "chrome124"   # cm29.py와 동일. 차단되면 최신 버전으로 올릴 것
 
     def _extract_id(self, url: str) -> str:
         for pat in self._URL_PATTERNS:
@@ -48,12 +62,9 @@ class MusinsaScraper(BaseScraper):
         return f"https://www.musinsa.com/products/{self._extract_id(url)}"
 
     def _headers(self, pid: str) -> dict:
+        # User-Agent는 curl_cffi impersonate가 TLS 지문과 일치하게 자동 설정한다.
+        # 직접 지정하면 지문/UA 불일치로 오히려 Cloudflare에 걸린다.
         return {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "ko-KR,ko;q=0.9",
             "Referer": f"https://www.musinsa.com/products/{pid}",
@@ -64,16 +75,25 @@ class MusinsaScraper(BaseScraper):
         pid = self._extract_id(url)
         normalized = self._normalize_url(url)
 
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=15.0, headers=self._headers(pid)
+        # curl_cffi: Chrome TLS/HTTP2 지문을 흉내내 Cloudflare 봇 차단을 통과한다.
+        # max_clients: 재고 바이너리 서치가 옵션당 수십 개 요청을 동시에 날린다.
+        async with AsyncSession(
+            impersonate=self._IMPERSONATE, timeout=15.0,
+            headers=self._headers(pid), max_clients=30,
         ) as client:
             product_name, base_price, sale_type = await self._fetch_goods_info(client, pid)
-            options = await self._fetch_options(client, pid, base_price,
-                                                run_stock_check=(sale_type == "SALE"))
+            options, statuses = await self._fetch_options(
+                client, pid, base_price, run_stock_check=(sale_type == "SALE")
+            )
 
         if not options:
+            if statuses and all(s in (403, 429) for s in statuses):
+                raise RuntimeError(
+                    f"무신사 봇 차단(HTTP {statuses[0]}) — 옵션 API 접근이 거부되었습니다.\n"
+                    f"curl_cffi impersonate 버전을 최신 Chrome으로 올려야 할 수 있습니다."
+                )
             raise RuntimeError(
-                f"옵션 파싱 실패.\n"
+                f"옵션 파싱 실패 (옵션 API 응답: {statuses or '요청 실패'}).\n"
                 f"확인 방법: http://localhost:8002/api/debug-json?pid={pid} 를 브라우저에서 열어주세요."
             )
 
@@ -87,7 +107,7 @@ class MusinsaScraper(BaseScraper):
     # ── 상품 기본 정보 ────────────────────────────────────────────────────────
 
     async def _fetch_goods_info(
-        self, client: httpx.AsyncClient, pid: str
+        self, client: AsyncSession, pid: str
     ) -> tuple[str, int, str]:
         """(상품명, 가격, goodsSaleType) 반환"""
         try:
@@ -116,9 +136,14 @@ class MusinsaScraper(BaseScraper):
     # ── 옵션 조회 ─────────────────────────────────────────────────────────────
 
     async def _fetch_options(
-        self, client: httpx.AsyncClient, pid: str, base_price: int,
+        self, client: AsyncSession, pid: str, base_price: int,
         run_stock_check: bool = True,
-    ) -> list[ProductOption]:
+    ) -> tuple[list[ProductOption], list[int]]:
+        """(옵션 목록, 시도한 요청들의 status code 목록) 반환.
+
+        status code는 실패 원인(차단 403 vs 진짜 파싱 실패)을 구분하기 위해 수집한다.
+        """
+        statuses: list[int] = []
         for kind in self._OPT_KIND_CODES:
             params = "goodsSaleType=SALE"
             if kind:
@@ -126,6 +151,7 @@ class MusinsaScraper(BaseScraper):
             url = f"https://goods-detail.musinsa.com/api2/goods/{pid}/options?{params}"
             try:
                 resp = await client.get(url)
+                statuses.append(resp.status_code)
                 if resp.status_code != 200:
                     continue
                 options = self._parse_option_items(resp.json(), base_price)
@@ -138,17 +164,17 @@ class MusinsaScraper(BaseScraper):
                         for opt in options:
                             opt.stock = 0
                             opt.soldout = True
-                    return options
+                    return options, statuses
             except Exception:
                 continue
-        return []
+        return [], statuses
 
     # ── 재고 수량 바이너리 서치 ───────────────────────────────────────────────
 
     _FULFILLMENT_IDS = [2, 1, 3]   # 시도 순서: 2가 가장 널리 쓰임
 
     async def _fill_stock_counts(
-        self, client: httpx.AsyncClient, pid: str, options: list[ProductOption]
+        self, client: AsyncSession, pid: str, options: list[ProductOption]
     ) -> None:
         """activated=True인 옵션들의 재고 수량을 병렬 바이너리 서치로 채움."""
         active = [(i, opt) for i, opt in enumerate(options)
@@ -182,58 +208,104 @@ class MusinsaScraper(BaseScraper):
             # (모든 옵션이 0 → API 자체가 이 상품 미지원, activated 유지)
 
     async def _probe_fulfillment_id(
-        self, client: httpx.AsyncClient, pid: str, option_item_no: int
+        self, client: AsyncSession, pid: str, option_item_no: int
     ) -> int:
-        """재고가 있다고 응답하는 첫 번째 fulfillmentCenterId 반환."""
-        for fid in self._FULFILLMENT_IDS:
-            oos = await self._check_out_of_stock(client, pid, option_item_no, 1, fid)
-            if not oos:        # 재고 있음 → 이 센터 ID 사용
+        """재고가 있다고 응답하는 첫 번째 fulfillmentCenterId 반환 (병렬 프로브)."""
+        results = await asyncio.gather(*[
+            self._check_out_of_stock(client, pid, option_item_no, 1, fid)
+            for fid in self._FULFILLMENT_IDS
+        ])
+        for fid, oos in zip(self._FULFILLMENT_IDS, results):
+            if oos is False:      # None(판단 불가)은 채택하지 않음
                 return fid
-        return self._FULFILLMENT_IDS[0]   # 모두 품절이면 기본값
+        return self._FULFILLMENT_IDS[0]   # 모두 품절/불가면 기본값
+
+    # 병렬 exponential probe로 초기 재고 범위 확정 (log 스케일)
+    _PROBE_QUANTITIES = [2, 5, 10, 20, 50, 100, 200, 500, 1000]
 
     async def _binary_search_stock(
-        self, client: httpx.AsyncClient, pid: str, option_item_no: int, fid: int
+        self, client: AsyncSession, pid: str, option_item_no: int, fid: int
     ) -> int:
         """
-        check-available-stock POST API를 이용해 바이너리 서치로 재고 수량 반환.
+        check-available-stock POST API로 재고 수량 반환.
           0   → 품절 (모든 fid가 OOS 반환)
-          N   → 정확한 재고 수량
-          -1  → _STOCK_MAX_QTY 초과
+          N   → 정확한 재고 수량 (1 ≤ N ≤ 999)
+          -1  → _STOCK_MAX_QTY 초과 (수량 미표시)
+          _StockUnknown 예외 → API가 답을 주지 않아 판단 불가
+
+        전략:
+          1) quantity=1로 재고 유무 확인 (fid 폴백 포함)
+          2) exponential probe 병렬 호출 → 대략 범위 확정
+          3) 좁은 범위에서만 짧은 binary search로 정확한 값 확정
         """
-        if await self._check_out_of_stock(client, pid, option_item_no, 1, fid):
-            # primary fid가 OOS → 이 옵션에 맞는 대안 fid 탐색
-            # (옵션마다 물류센터가 다를 수 있으므로 옵션 단위로 재시도)
-            alt = None
-            # fid 1~15 + None 을 병렬로 탐색 (primary fid 제외)
+        # ── 1) 최소 재고(1) 확인 및 fid 폴백 ──────────────────────────
+        first = await self._check_out_of_stock(client, pid, option_item_no, 1, fid)
+        if first is None:
+            raise _StockUnknown(option_item_no)
+        if first:
             all_candidates = [f for f in range(1, 16) if f != fid] + [None]
             probe_results = await asyncio.gather(
                 *[self._check_out_of_stock(client, pid, option_item_no, 1, c)
                   for c in all_candidates]
             )
+            if all(r is None for r in probe_results):
+                raise _StockUnknown(option_item_no)
             alt = next(
-                (c for c, oos in zip(all_candidates, probe_results) if not oos),
+                (c for c, oos in zip(all_candidates, probe_results) if oos is False),
                 "NOT_FOUND",
             )
             if alt == "NOT_FOUND":
-                return 0  # 모든 fid가 OOS → 품절
+                return 0
             fid = alt
-        if not await self._check_out_of_stock(client, pid, option_item_no, self._STOCK_MAX_QTY + 1, fid):
+
+        # ── 2) 병렬 exponential probe: 여러 quantity를 한 번에 확인 ──
+        probe_results = await asyncio.gather(
+            *[self._check_out_of_stock(client, pid, option_item_no, q, fid)
+              for q in self._PROBE_QUANTITIES]
+        )
+        if all(r is None for r in probe_results):
+            raise _StockUnknown(option_item_no)
+        max_ok = 1                       # quantity=1은 위에서 통과됨
+        min_oos = self._STOCK_MAX_QTY + 1
+        for q, oos in zip(self._PROBE_QUANTITIES, probe_results):
+            if oos is None:              # 판단 불가한 프로브는 범위 계산에서 제외
+                continue
+            if oos:
+                if q < min_oos:
+                    min_oos = q
+            else:
+                if q > max_ok:
+                    max_ok = q
+
+        # quantity=1000이 OK → 재고 999 이상 → -1
+        if max_ok > self._STOCK_MAX_QTY:
             return -1
 
-        lo, hi = 1, self._STOCK_MAX_QTY
+        # ── 3) 좁은 범위에서 짧은 binary search로 정확한 값 확정 ────
+        lo, hi = max_ok, min_oos - 1
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if await self._check_out_of_stock(client, pid, option_item_no, mid, fid):
+            oos = await self._check_out_of_stock(client, pid, option_item_no, mid, fid)
+            if oos is None:
+                # 여기서 멈추면 lo까지는 확인된 값이므로 하한값을 반환한다.
+                break
+            if oos:
                 hi = mid - 1
             else:
                 lo = mid
         return lo
 
     async def _check_out_of_stock(
-        self, client: httpx.AsyncClient, pid: str, option_item_no: int,
+        self, client: AsyncSession, pid: str, option_item_no: int,
         quantity: int, fid: int | None = 2
-    ) -> bool:
-        """quantity 만큼 구매 가능한지 확인. True=재고 부족.
+    ) -> bool | None:
+        """quantity 만큼 구매 가능한지 확인.
+          True  = 재고 부족
+          False = 구매 가능
+          None  = 판단 불가 (차단·타임아웃 등 API가 답을 주지 않음)
+
+        None을 False(구매 가능)로 뭉개면 차단당했을 때 품절 상품이
+        "재고있음"으로 표시되므로 반드시 구분한다.
         fid=None: fulfillmentCenterId 생략 (MFS 다중재고 상품용)."""
         body: dict = {"optionItemNo": option_item_no, "quantity": quantity}
         if fid is not None:
@@ -244,10 +316,10 @@ class MusinsaScraper(BaseScraper):
                 json=body,
             )
             if resp.status_code != 200:
-                return False
+                return None
             return resp.json().get("data", {}).get("isOutOfStock", False)
         except Exception:
-            return False
+            return None
 
     # ── 파서 ─────────────────────────────────────────────────────────────────
 

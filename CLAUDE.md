@@ -65,6 +65,15 @@ class ProductInfo:
 - 옵션 목록: `GET goods-detail.musinsa.com/api2/goods/{pid}/options?goodsSaleType=SALE&optKindCd={CLOTHES|SHOES|BAG|ACC|}`
 - 재고 확인: `POST goods-detail.musinsa.com/api2/goods/{pid}/options/check-available-stock`
 
+**HTTP 클라이언트: `curl_cffi` (impersonate=`chrome124`) — httpx 사용 금지**
+- 2026-09 무신사가 `goods-detail.musinsa.com`에 Cloudflare 봇 차단을 켬.
+  httpx로 보내면 Python OpenSSL TLS 지문 때문에 **모든 요청이 403 HTML**을 받는다
+  (IP 차단 아님 — 같은 PC의 curl은 200). 29cm가 겪었던 것과 동일한 문제.
+- `_headers()`에 User-Agent를 직접 넣지 말 것. impersonate가 TLS 지문과 맞는 UA를 자동 설정하며,
+  직접 지정하면 지문/UA 불일치로 오히려 걸린다.
+- 다시 403이 나면 `MusinsaScraper._IMPERSONATE`를 최신 Chrome 버전으로 올릴 것.
+- `main.py`의 `/api/debug-json`도 같은 이유로 curl_cffi를 쓴다.
+
 **핵심 로직:**
 - `optKindCd`를 `["CLOTHES", "SHOES", "BAG", "ACC", ""]` 순서로 시도, 옵션이 있으면 사용
 - 재고 수량: **바이너리 서치** (`_binary_search_stock`) — `check-available-stock` POST API 반복 호출
@@ -128,6 +137,16 @@ data.sellPrice = 26100                          ← 기본 판매가
 - groupKey 없으면 HTML fetch 후 정규식으로 추출: `"groupKey":"([A-Za-z0-9]{6,12})"`
 - 재고 수량은 LOW/MEDIUM/HIGH만 제공 (정확한 수치 없음) → `stock_level` 필드 사용
 - `stock = 0 if soldout else -1`, `stock_level = "" if soldout else ship`
+- **styleColor 없는 URL 지원**: `/kr/t/{slug}-{groupKey}` 형태(canonical)면 전 색상을 조회.
+  ProductGroup JSON-LD의 `hasVariant`로 `styleColor → 색상명/가격` 맵을 만들어 매핑한다.
+- 같은 사이즈가 레귤러/와이드로 중복되므로 `groupingLabel`을 사이즈명에 덧붙인다.
+
+**단종 색상 처리 (중요):**
+- 색상이 단종되면 Nike는 그 URL을 색상 없는 canonical URL로 **리다이렉트**하고,
+  재고 API 응답에서도 해당 `productCode`가 사라진다.
+- 이때 예전 코드는 "재고 정보를 가져올 수 없습니다"만 띄워 스크래퍼 버그처럼 보였다.
+  현재는 **현재 판매 중인 색상 코드 목록**을 에러 메시지에 함께 보여준다.
+- 즉 이 에러가 보이면 코드 문제가 아니라 **URL이 낡은 것**이다.
 
 **URL 패턴 예시 (실제 작동 확인):**
 ```
@@ -150,11 +169,19 @@ https://www.nike.com/kr/t/{slug}-{8charKey}/{styleColor}
 
 **데이터 추출 방법:**
 ```python
-# RSC 블록에서 dehydrated state 위치 탐색
+# push 블록을 전부 이어붙인 뒤(한 객체가 블록 경계를 넘나듦) dehydrated state 탐색
+content_str = "".join(json.loads(b) for b in next_f_blocks)
 idx = content_str.find('{"state":{"mutations"')
 obj, _ = decoder.raw_decode(content_str, idx)
-product = obj['state']['queries'][0]['state']['data']['product']
+# queryKey == ["get-detail-product", pid] 인 쿼리를 찾는다
+product = obj['state']['queries'][i]['state']['data']['product']
 ```
+
+**진열 중단 상품 처리 (중요):**
+- 진열이 내려간 상품은 `get-detail-product` 쿼리가
+  `{"data": "해당 상품은 진열 상품이 아닙니다.", "code": false}` 를 반환한다(HTTP는 200).
+- 이 경우 사이트가 준 메시지를 그대로 에러에 실어 보여준다.
+  이 에러가 보이면 코드 문제가 아니라 **상품이 내려간 것**이다.
 
 **옵션 구조:**
 ```
@@ -258,7 +285,11 @@ const SUPPORTED = [
 
 ---
 
-## 검증된 테스트 URL 목록 (18/18 통과)
+## 검증된 테스트 URL 목록 (2026-09-03 재검증, 15/15 통과)
+
+> **주의:** Nike/Arc'teryx 테스트 URL은 상품 단종·진열중단으로 수시로 죽는다.
+> 조회 실패 시 스크래퍼 버그를 의심하기 전에 **해당 상품이 아직 판매 중인지** 먼저 확인할 것.
+> 아래 URL도 언젠가는 죽으므로, 죽으면 현재 판매 중인 상품으로 교체할 것.
 
 ```
 # 무신사
@@ -277,15 +308,14 @@ https://www.29cm.co.kr/catalog/2634598    ← 신발 (사이즈별 재고)
 https://www.29cm.co.kr/catalog/3894236    ← 가방 (색상만)
 
 # Nike Korea
-https://www.nike.com/kr/t/hzTwdMlw/IB1873-702   ← 페가수스 42 런닝화
-https://www.nike.com/kr/t/giaG3vkT/IH8039-001   ← 줌 보메로 5 SE
-https://www.nike.com/kr/t/qdjlTENZ/IR0951-001   ← 에어포스 1 '07
-https://www.nike.com/kr/t/IF0756-323/IF0756-323  ← 스포츠웨어 탑
+https://www.nike.com/kr/t/나이키-페가수스-42-남성-로드-러닝화-hzTwdMlw            ← 색상코드 없는 canonical URL → 전 색상 219옵션
+https://www.nike.com/kr/t/나이키-페가수스-42-남성-로드-러닝화-hzTwdMlw/IB1873-001  ← 단일 색상 15옵션
+https://www.nike.com/kr/t/qdjlTENZ/CW2288-111                                  ← 에어포스 1 '07 (짧은 형태 URL)
 
 # Arc'teryx Korea
-https://arcteryx.co.kr/products/view/686182   ← Heliad 15 Backpack
-https://arcteryx.co.kr/products/view/686155   ← Belfry Pant
-https://arcteryx.co.kr/products/view/686300   ← Cerium Hoody
+https://arcteryx.co.kr/products/view/686155   ← Belfry Pant (2색상 × 5사이즈)
+https://arcteryx.co.kr/products/view/686300   ← Cerium Hoody (다색상 × 다사이즈)
+# 686182(Heliad 15 Backpack)는 진열 중단됨 — "해당 상품은 진열 상품이 아닙니다." 반환
 ```
 
 ---

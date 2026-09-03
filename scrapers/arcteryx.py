@@ -72,8 +72,11 @@ class ArcterycScraper(BaseScraper):
                 )
             html = resp.text
 
-        product = self._extract_product_data(html, pid)
+        product, site_message = self._extract_product_data(html, pid)
         if not product:
+            if site_message:
+                # 진열 중단/판매 종료 등 사이트가 직접 알려주는 사유를 그대로 보여준다.
+                raise RuntimeError(f"Arc'teryx: {site_message} (pid={pid})")
             raise RuntimeError(
                 f"Arc'teryx 상품 데이터를 찾을 수 없습니다. (pid={pid})"
             )
@@ -96,43 +99,54 @@ class ArcterycScraper(BaseScraper):
 
     # ── RSC 페이로드 파싱 ──────────────────────────────────────────────────────
 
-    def _extract_product_data(self, html: str, pid: str) -> dict | None:
+    def _extract_product_data(self, html: str, pid: str) -> tuple[dict | None, str]:
         """
         Next.js RSC self.__next_f.push([1, "..."]) 블록에서
-        dehydrated React Query state를 찾아 product 데이터 반환.
-        """
-        blocks = re.findall(
-            r'self\.__next_f\.push\(\[(.*?)\]\)', html, re.DOTALL
-        )
-        decoder = json.JSONDecoder()
+        dehydrated React Query state를 찾아 (product, 사이트 메시지) 반환.
 
-        for block in blocks:
+        RSC 페이로드는 한 객체가 여러 push 블록에 걸쳐 쪼개져 들어오므로
+        블록별로 파싱하지 않고 전부 이어붙인 뒤 탐색한다.
+
+        get-detail-product 쿼리가 code=false 로 오면 (예: 진열 중단 상품)
+        data 에 사유 문자열이 들어있다 → 두 번째 반환값으로 전달.
+        """
+        content_str = ""
+        for block in re.findall(r'self\.__next_f\.push\(\[(.*?)\]\)', html, re.DOTALL):
             # 형식: 1,"<JSON-encoded RSC string>"
             m = re.match(r'^1,(.*)$', block, re.DOTALL)
             if not m:
                 continue
             try:
-                content_str = json.loads(m.group(1).strip())
+                content_str += json.loads(m.group(1).strip())
             except (json.JSONDecodeError, ValueError):
                 continue
 
+        decoder = json.JSONDecoder()
+        message = ""
+        pos = 0
+        while True:
             # dehydrated React Query state 마커 탐색
-            idx = content_str.find('{"state":{"mutations"')
+            idx = content_str.find('{"state":{"mutations"', pos)
             if idx < 0:
-                continue
-
+                break
+            pos = idx + 1
             try:
                 obj, _ = decoder.raw_decode(content_str, idx)
-                queries = obj.get("state", {}).get("queries", [])
-                for q in queries:
-                    data = q.get("state", {}).get("data", {})
-                    product = data.get("product")
-                    if isinstance(product, dict) and str(product.get("id")) == pid:
-                        return product
-            except (json.JSONDecodeError, ValueError, KeyError):
+            except (json.JSONDecodeError, ValueError):
                 continue
 
-        return None
+            for q in obj.get("state", {}).get("queries", []):
+                data = q.get("state", {}).get("data")
+                if not isinstance(data, dict):
+                    continue
+                product = data.get("product")
+                if isinstance(product, dict) and str(product.get("id")) == pid:
+                    return product, ""
+                # code=false → data 가 사유 문자열 ("해당 상품은 진열 상품이 아닙니다." 등)
+                if data.get("code") is False and isinstance(data.get("data"), str):
+                    message = data["data"]
+
+        return None, message
 
     # ── 옵션/재고 파서 ────────────────────────────────────────────────────────
 

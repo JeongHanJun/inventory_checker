@@ -107,14 +107,17 @@ async def debug_json(pid: str = Query(..., description="Musinsa 상품 ID")):
     브라우저에서 직접 열 수 있는 Musinsa API 원본 응답 뷰어.
     예: http://localhost:8000/api/debug-json?pid=3435636
     """
+    # 무신사는 Cloudflare 봇 차단이 걸려 있어 httpx로는 전부 403.
+    # 스크래퍼와 동일하게 curl_cffi impersonation을 써야 실제 응답이 보인다.
+    from curl_cffi.requests import AsyncSession
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Referer": f"https://www.musinsa.com/products/{pid}",
         "Origin": "https://www.musinsa.com",
     }
     result = {}
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0, headers=headers) as client:
+    async with AsyncSession(impersonate="chrome124", timeout=10.0, headers=headers) as client:
         for label, url in {
             "goods_info": f"https://goods-detail.musinsa.com/api2/goods/{pid}",
             "options_CLOTHES": f"https://goods-detail.musinsa.com/api2/goods/{pid}/options?goodsSaleType=SALE&optKindCd=CLOTHES",

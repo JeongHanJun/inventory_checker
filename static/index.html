@@ -19,6 +19,31 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* 인디터미넌트 프로그레스바 */
+    .progress-bar {
+      width: 100%;
+      max-width: 280px;
+      height: 4px;
+      background: #eef2ff;
+      border-radius: 9999px;
+      overflow: hidden;
+      position: relative;
+      margin: 0 auto;
+    }
+    .progress-bar::before {
+      content: "";
+      position: absolute;
+      top: 0; height: 100%;
+      width: 40%;
+      background: linear-gradient(90deg, transparent, #6366f1 40%, #818cf8 60%, transparent);
+      border-radius: 9999px;
+      animation: progressSlide 1.1s ease-in-out infinite;
+    }
+    @keyframes progressSlide {
+      0%   { left: -40%; }
+      100% { left: 100%; }
+    }
+
     /* 재고 표시 */
     .stock-num  { font-weight: 700; font-size: 0.88rem; }
     .stock-badge {
@@ -139,9 +164,9 @@
   </div>
 
   <!-- 로딩 -->
-  <div id="loading" class="hidden text-center py-10">
-    <div class="spinner mx-auto mb-3"></div>
-    <p class="text-gray-400 text-sm">재고를 조회하는 중… (5~15초)</p>
+  <div id="loading" class="hidden text-center py-8">
+    <div class="progress-bar mb-3"></div>
+    <p class="text-gray-400 text-xs">재고 조회 중…</p>
   </div>
 
   <!-- 에러 -->
@@ -282,6 +307,14 @@ async function doSearch(url) {
   }
 }
 
+// URL 필드에 붙여넣기 시 자동 조회 (지원 사이트 URL이면 즉시 실행)
+document.getElementById("urlInput").addEventListener("paste", () => {
+  // paste 이벤트는 값 반영 전에 발생 → setTimeout 0으로 반영 후 확인
+  setTimeout(() => {
+    const v = document.getElementById("urlInput").value.trim();
+    if (isProductUrl(v)) doSearch(v);
+  }, 0);
+});
 document.getElementById("urlInput").addEventListener("keydown", e => {
   if (e.key === "Enter") doSearch();
 });
